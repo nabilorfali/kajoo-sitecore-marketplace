@@ -3,23 +3,127 @@
 import { useEffect, useRef, useState } from "react";
 import { MARKETPLACE_APP_ID } from "@/lib/agent-session";
 
-type Status = "idle" | "loading" | "streaming" | "done" | "error";
+// ── Types ────────────────────────────────────────────────────────────────────
 
-interface SitecoreContext {
-  siteName?: string;
-  pageTitle?: string;
+interface ChatMessage {
+  id: string;
+  role: "user" | "agent";
+  text: string;
+  streaming?: boolean;
 }
 
-export default function Home() {
-  const [figmaUrl, setFigmaUrl] = useState("");
-  const [status, setStatus] = useState<Status>("idle");
-  const [output, setOutput] = useState("");
-  const [warnings, setWarnings] = useState<string[]>([]);
-  const [sessionId, setSessionId] = useState<string | null>(null);
-  const [sitecoreCtx, setSitecoreCtx] = useState<SitecoreContext>({});
-  const outputRef = useRef<HTMLDivElement>(null);
+interface Activity {
+  id: string;
+  text: string;
+}
 
-  // Initialise Sitecore Marketplace SDK (client-side only)
+// ── Code block ───────────────────────────────────────────────────────────────
+
+function CodeBlock({ lang, code }: { lang: string; code: string }) {
+  const [copied, setCopied] = useState(false);
+
+  function copy() {
+    navigator.clipboard.writeText(code.trim());
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  }
+
+  return (
+    <div className="my-3 rounded-xl overflow-hidden border border-gray-700 text-left">
+      <div className="flex items-center justify-between px-4 py-1.5 bg-gray-800 text-gray-400 text-xs font-mono">
+        <span>{lang || "code"}</span>
+        <button onClick={copy} className="hover:text-white transition-colors">
+          {copied ? "Copied!" : "Copy"}
+        </button>
+      </div>
+      <pre className="bg-gray-900 text-gray-100 p-4 overflow-x-auto text-xs leading-relaxed m-0">
+        <code>{code.trim()}</code>
+      </pre>
+    </div>
+  );
+}
+
+// ── Markdown renderer ────────────────────────────────────────────────────────
+
+function MessageContent({ text }: { text: string }) {
+  // Split on complete ```lang\n...\n``` fences only
+  const parts = text.split(/(```[a-zA-Z]*\n[\s\S]*?```)/g);
+
+  return (
+    <div>
+      {parts.map((part, i) => {
+        const fence = part.match(/^```([a-zA-Z]*)\n([\s\S]*?)```$/);
+        if (fence) {
+          return <CodeBlock key={i} lang={fence[1]} code={fence[2]} />;
+        }
+        // Render plain text preserving whitespace
+        return (
+          <p key={i} className="whitespace-pre-wrap leading-relaxed text-sm">
+            {part}
+          </p>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Chat components ──────────────────────────────────────────────────────────
+
+function AgentAvatar() {
+  return (
+    <div
+      className="w-8 h-8 rounded-lg flex-shrink-0 flex items-center justify-center text-white text-sm font-bold"
+      style={{ background: "var(--sitecore-red)" }}
+    >
+      K
+    </div>
+  );
+}
+
+function UserAvatar() {
+  return (
+    <div className="w-8 h-8 rounded-lg flex-shrink-0 flex items-center justify-center bg-gray-200 text-gray-600 text-sm font-semibold">
+      U
+    </div>
+  );
+}
+
+function ActivityPill({ text }: { text: string }) {
+  return (
+    <div className="flex items-center gap-1.5 text-xs text-gray-400 py-1 px-3 ml-11">
+      <span className="inline-block w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse flex-shrink-0" />
+      {text}
+    </div>
+  );
+}
+
+// ── Main page ────────────────────────────────────────────────────────────────
+
+const WELCOME: ChatMessage = {
+  id: "welcome",
+  role: "agent",
+  text: `Hi! I'm Kajoo, your Figma → Sitecore code generator.
+
+Paste a Figma frame URL and I'll generate production-ready Sitecore components — Razor views, Glass Mapper models, Helix architecture, BEM CSS, and rendering templates.
+
+You can also ask things like:
+- "Make it a Controller Rendering in the Feature layer"
+- "Use SXA tokens for colours instead of hardcoded values"
+- "Add a mobile breakpoint at 768px"`,
+};
+
+export default function Home() {
+  const [messages, setMessages] = useState<ChatMessage[]>([WELCOME]);
+  const [activities, setActivities] = useState<Activity[]>([]);
+  const [input, setInput] = useState("");
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [warnings, setWarnings] = useState<string[]>([]);
+
+  const bottomRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Initialise Sitecore Marketplace SDK (client-side only, fails gracefully outside iframe)
   useEffect(() => {
     let mounted = true;
     (async () => {
@@ -28,49 +132,50 @@ export default function Home() {
         const sdk = await ClientSDK.init({ target: window.parent });
         const ctx = await sdk.query("application.context") as unknown as Record<string, unknown>;
         if (mounted) {
-          setSitecoreCtx({
-            siteName: (ctx?.siteName as string) ?? undefined,
-            pageTitle: (ctx?.pageTitle as string) ?? undefined,
-          });
           console.log("[Marketplace] app:", MARKETPLACE_APP_ID, "ctx:", ctx);
         }
       } catch {
-        // Running outside Sitecore (local dev) — ignore
+        // Outside Sitecore iframe — ignore
       }
     })();
     return () => { mounted = false; };
   }, []);
 
-  // Auto-scroll output
+  // Auto-scroll to bottom
   useEffect(() => {
-    if (outputRef.current) {
-      outputRef.current.scrollTop = outputRef.current.scrollHeight;
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, activities]);
+
+  async function handleSend(text: string) {
+    if (!text.trim() || isStreaming) return;
+
+    const agentMsgId = crypto.randomUUID();
+
+    setMessages((prev) => [
+      ...prev,
+      { id: crypto.randomUUID(), role: "user", text: text.trim() },
+      { id: agentMsgId, role: "agent", text: "", streaming: true },
+    ]);
+    setActivities([]);
+    setInput("");
+    setIsStreaming(true);
+
+    // Reset textarea height
+    if (textareaRef.current) {
+      textareaRef.current.style.height = "auto";
     }
-  }, [output]);
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    if (!figmaUrl.trim()) return;
-
-    setStatus("loading");
-    setOutput("");
-    setWarnings([]);
-    setSessionId(null);
 
     try {
       const res = await fetch("/api/agent", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ figmaUrl: figmaUrl.trim() }),
+        body: JSON.stringify({ message: text.trim(), sessionId }),
       });
 
       if (!res.ok || !res.body) {
-        setStatus("error");
-        setOutput("Failed to connect to agent.");
-        return;
+        throw new Error(`HTTP ${res.status}`);
       }
 
-      setStatus("streaming");
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
@@ -95,59 +200,92 @@ export default function Home() {
             if (event.type === "session" && event.sessionId) {
               setSessionId(event.sessionId);
             } else if (event.type === "text" && event.text) {
-              setOutput((prev) => prev + event.text);
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === agentMsgId ? { ...m, text: m.text + event.text! } : m,
+                ),
+              );
+            } else if (event.type === "activity" && event.text) {
+              setActivities((prev) => [
+                ...prev,
+                { id: crypto.randomUUID(), text: event.text! },
+              ]);
             } else if (event.type === "warn" && event.text) {
               setWarnings((prev) => [...prev, event.text!]);
             } else if (event.type === "done") {
-              setStatus("done");
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === agentMsgId ? { ...m, streaming: false } : m,
+                ),
+              );
+              setActivities([]);
+              setIsStreaming(false);
             } else if (event.type === "error" && event.text) {
-              setStatus("error");
-              setOutput((prev) => prev + `\n\n⚠️ Error: ${event.text}`);
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === agentMsgId
+                    ? { ...m, text: m.text || `⚠️ ${event.text}`, streaming: false }
+                    : m,
+                ),
+              );
+              setActivities([]);
+              setIsStreaming(false);
             }
           } catch {
             // malformed SSE line — skip
           }
         }
       }
-
-      if (status === "streaming") setStatus("done");
     } catch (err) {
-      setStatus("error");
-      setOutput(`Connection error: ${err instanceof Error ? err.message : err}`);
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === agentMsgId
+            ? {
+                ...m,
+                text: `Connection error: ${err instanceof Error ? err.message : err}`,
+                streaming: false,
+              }
+            : m,
+        ),
+      );
+      setActivities([]);
+      setIsStreaming(false);
     }
   }
 
-  function handleCopy() {
-    navigator.clipboard.writeText(output);
+  function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      handleSend(input);
+    }
   }
 
-  const isRunning = status === "loading" || status === "streaming";
+  function handleInput(e: React.FormEvent<HTMLTextAreaElement>) {
+    const el = e.currentTarget;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+  }
 
   return (
-    <div className="min-h-screen flex flex-col" style={{ fontFamily: "inherit" }}>
+    <div className="h-screen flex flex-col bg-gray-50">
       {/* Header */}
-      <header className="border-b bg-white px-6 py-4 flex items-center gap-3">
+      <header className="border-b bg-white px-6 py-3 flex items-center gap-3 flex-shrink-0 shadow-sm">
         <div
-          className="w-8 h-8 rounded flex items-center justify-center text-white text-sm font-bold"
+          className="w-8 h-8 rounded-lg flex items-center justify-center text-white text-sm font-bold"
           style={{ background: "var(--sitecore-red)" }}
         >
           K
         </div>
         <div>
-          <h1 className="text-base font-semibold text-gray-900 leading-none">
+          <h1 className="text-sm font-semibold text-gray-900 leading-none">
             Figma → Sitecore
           </h1>
-          <p className="text-xs text-gray-500 mt-0.5">
-            Kajoo AI · powered by claude-opus-4-6
-            {sitecoreCtx.siteName && (
-              <span className="ml-2 text-blue-600">
-                · {sitecoreCtx.siteName}
-              </span>
-            )}
+          <p className="text-xs text-gray-400 mt-0.5">
+            Kajoo AI · claude-opus-4-6
           </p>
         </div>
         {sessionId && (
-          <span className="ml-auto text-xs text-gray-400 font-mono truncate max-w-xs">
+          <span className="ml-auto text-xs text-gray-300 font-mono truncate max-w-xs hidden sm:block">
             {sessionId}
           </span>
         )}
@@ -155,7 +293,7 @@ export default function Home() {
 
       {/* Warnings */}
       {warnings.length > 0 && (
-        <div className="bg-amber-50 border-b border-amber-200 px-6 py-2 space-y-1">
+        <div className="bg-amber-50 border-b border-amber-200 px-6 py-2 space-y-1 flex-shrink-0">
           {warnings.map((w, i) => (
             <p key={i} className="text-xs text-amber-700">
               ⚠️ {w}
@@ -164,104 +302,108 @@ export default function Home() {
         </div>
       )}
 
-      {/* Main */}
-      <main className="flex-1 flex flex-col gap-4 p-6 max-w-4xl w-full mx-auto">
-        {/* Input form */}
-        <form onSubmit={handleSubmit} className="flex gap-2">
-          <input
-            type="url"
-            value={figmaUrl}
-            onChange={(e) => setFigmaUrl(e.target.value)}
-            placeholder="https://www.figma.com/design/..."
-            disabled={isRunning}
-            className="flex-1 border border-gray-300 rounded-lg px-4 py-2.5 text-sm
-                       focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-transparent
-                       disabled:bg-gray-50 disabled:text-gray-400"
-          />
-          <button
-            type="submit"
-            disabled={isRunning || !figmaUrl.trim()}
-            className="px-5 py-2.5 rounded-lg text-sm font-medium text-white transition-colors
-                       disabled:opacity-50 disabled:cursor-not-allowed"
-            style={{
-              background: isRunning ? "#9ca3af" : "var(--sitecore-red)",
-            }}
-          >
-            {status === "loading"
-              ? "Starting…"
-              : status === "streaming"
-              ? "Generating…"
-              : "Generate"}
-          </button>
-        </form>
+      {/* Messages */}
+      <main className="flex-1 overflow-y-auto px-4 py-6">
+        <div className="max-w-3xl mx-auto">
+          {messages.map((msg) =>
+            msg.role === "agent" ? (
+              <div key={msg.id} className="flex items-end gap-3 mb-4">
+                <AgentAvatar />
+                <div className="flex-1 min-w-0">
+                  <div className="bg-white border border-gray-200 rounded-2xl rounded-bl-sm px-4 py-3 shadow-sm">
+                    {msg.text ? (
+                      <MessageContent text={msg.text} />
+                    ) : null}
+                    {msg.streaming && !msg.text && (
+                      <div className="flex gap-1 items-center h-5">
+                        <span
+                          className="w-2 h-2 rounded-full bg-gray-400 animate-bounce"
+                          style={{ animationDelay: "0ms" }}
+                        />
+                        <span
+                          className="w-2 h-2 rounded-full bg-gray-400 animate-bounce"
+                          style={{ animationDelay: "150ms" }}
+                        />
+                        <span
+                          className="w-2 h-2 rounded-full bg-gray-400 animate-bounce"
+                          style={{ animationDelay: "300ms" }}
+                        />
+                      </div>
+                    )}
+                    {msg.streaming && msg.text && (
+                      <span className="inline-block w-1.5 h-4 bg-gray-400 animate-pulse ml-0.5 align-middle" />
+                    )}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div key={msg.id} className="flex items-end gap-3 mb-4 flex-row-reverse">
+                <UserAvatar />
+                <div className="max-w-xl">
+                  <div
+                    className="rounded-2xl rounded-br-sm px-4 py-3 text-white"
+                    style={{ background: "var(--sitecore-red)" }}
+                  >
+                    <p className="text-sm whitespace-pre-wrap leading-relaxed">
+                      {msg.text}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            ),
+          )}
 
-        {/* Status pill */}
-        {isRunning && (
-          <div className="flex items-center gap-2 text-sm text-gray-500">
-            <span className="inline-block w-2 h-2 rounded-full bg-green-400 animate-pulse" />
-            {status === "loading"
-              ? "Creating session…"
-              : "Agent is generating Sitecore code…"}
-          </div>
-        )}
+          {/* Live activity pills */}
+          {activities.map((a) => (
+            <ActivityPill key={a.id} text={a.text} />
+          ))}
 
-        {/* Output */}
-        {output && (
-          <div className="flex-1 flex flex-col border border-gray-200 rounded-xl overflow-hidden bg-white shadow-sm">
-            {/* Toolbar */}
-            <div className="flex items-center justify-between px-4 py-2 border-b bg-gray-50">
-              <span className="text-xs font-medium text-gray-600">
-                Generated Code
-                {status === "done" && (
-                  <span className="ml-2 text-green-600">· Complete</span>
-                )}
-              </span>
-              <button
-                onClick={handleCopy}
-                className="text-xs text-gray-500 hover:text-gray-800 px-2 py-1 rounded hover:bg-gray-200 transition-colors"
-              >
-                Copy
-              </button>
-            </div>
-
-            {/* Code output */}
-            <div
-              ref={outputRef}
-              className="flex-1 overflow-auto p-4 text-sm font-mono text-gray-800 whitespace-pre-wrap leading-relaxed"
-              style={{ maxHeight: "60vh" }}
-            >
-              {output}
-              {status === "streaming" && (
-                <span className="inline-block w-1.5 h-4 bg-gray-400 animate-pulse ml-0.5 align-middle" />
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* Empty state */}
-        {status === "idle" && !output && (
-          <div className="flex-1 flex flex-col items-center justify-center text-center py-16 text-gray-400">
-            <div
-              className="w-12 h-12 rounded-xl flex items-center justify-center mb-3 text-white text-xl"
-              style={{ background: "var(--sitecore-red)" }}
-            >
-              ✦
-            </div>
-            <p className="text-sm font-medium text-gray-600">
-              Paste a Figma URL to generate Sitecore components
-            </p>
-            <p className="text-xs mt-1">
-              Razor views · Glass Mapper · Helix architecture · BEM CSS
-            </p>
-          </div>
-        )}
+          <div ref={bottomRef} />
+        </div>
       </main>
 
-      {/* Footer */}
-      <footer className="border-t px-6 py-3 text-xs text-gray-400 flex justify-between">
-        <span>App ID: {MARKETPLACE_APP_ID}</span>
-        <span>Kajoo AI · SUGCON Europe 2026</span>
-      </footer>
+      {/* Input bar */}
+      <div className="border-t bg-white px-4 py-4 flex-shrink-0">
+        <div className="max-w-3xl mx-auto">
+          <div className="flex gap-3 items-end">
+            <textarea
+              ref={textareaRef}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={handleKeyDown}
+              onInput={handleInput}
+              placeholder={
+                isStreaming
+                  ? "Agent is responding…"
+                  : "Paste a Figma URL or ask anything… (Enter to send, Shift+Enter for new line)"
+              }
+              disabled={isStreaming}
+              rows={1}
+              className="flex-1 border border-gray-300 rounded-xl px-4 py-3 text-sm
+                         focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-transparent
+                         disabled:bg-gray-50 disabled:text-gray-400 resize-none leading-relaxed"
+              style={{ minHeight: "48px", maxHeight: "160px" }}
+            />
+            <button
+              onClick={() => handleSend(input)}
+              disabled={isStreaming || !input.trim()}
+              className="px-5 py-3 rounded-xl text-sm font-medium text-white transition-colors
+                         disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
+              style={{
+                background:
+                  isStreaming || !input.trim()
+                    ? "#9ca3af"
+                    : "var(--sitecore-red)",
+              }}
+            >
+              Send
+            </button>
+          </div>
+          <p className="text-xs text-gray-300 mt-2 text-center">
+            {MARKETPLACE_APP_ID}
+          </p>
+        </div>
+      </div>
     </div>
   );
 }

@@ -10,28 +10,12 @@ export const runtime = "nodejs";
 export const maxDuration = 120;
 
 export async function POST(req: NextRequest) {
-  const { figmaUrl, prompt } = await req.json();
+  const { message, sessionId: existingSessionId } = await req.json();
 
-  if (!figmaUrl && !prompt) {
-    return new Response("figmaUrl or prompt required", { status: 400 });
+  if (!message) {
+    return new Response("message required", { status: 400 });
   }
 
-  const userMessage = figmaUrl
-    ? `Please analyze this Figma design and generate production-ready Sitecore component code.
-
-Figma URL: ${figmaUrl}
-
-Generate:
-1. Razor view (.cshtml) with Sitecore Glass Mapper or SXA conventions
-2. Sitecore template definition with field types
-3. Rendering parameter template
-4. Component CSS/SCSS
-5. Any datasource notes
-
-Follow Sitecore Helix architecture (Feature layer). Use BEM class names.`
-    : prompt;
-
-  // Stream SSE back to the client
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
     async start(controller) {
@@ -43,10 +27,12 @@ Follow Sitecore Helix architecture (Feature layer). Use BEM class names.`
 
       try {
         const client = getClient();
-        const sessionId = await createSession(client);
+
+        // Reuse existing session for multi-turn, or create a new one
+        const sessionId = existingSessionId ?? await createSession(client);
         send({ type: "session", sessionId });
 
-        await sendMessage(client, sessionId, userMessage);
+        await sendMessage(client, sessionId, message);
 
         for await (const chunk of streamSession(client, sessionId)) {
           send(chunk);

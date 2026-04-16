@@ -44,16 +44,18 @@ export async function sendMessage(
 /**
  * Stream session events and yield text chunks + status signals.
  * Yields:
- *   { type: "text",    text: string }
- *   { type: "warn",    text: string }
- *   { type: "done"                  }
- *   { type: "error",   text: string }
+ *   { type: "text",     text: string }
+ *   { type: "activity", text: string }
+ *   { type: "warn",     text: string }
+ *   { type: "done"                   }
+ *   { type: "error",    text: string }
  */
 export async function* streamSession(
   client: Anthropic,
   sessionId: string,
 ): AsyncGenerator<
   | { type: "text"; text: string }
+  | { type: "activity"; text: string }
   | { type: "warn"; text: string }
   | { type: "done" }
   | { type: "error"; text: string }
@@ -110,10 +112,20 @@ export async function* streamSession(
         break;
       }
 
+      case "agent.mcp_tool_use":
+        yield { type: "activity", text: `${event.mcp_server_name} → ${event.name}` };
+        break;
+
+      case "agent.tool_use":
+        yield { type: "activity", text: `tool → ${event.name}` };
+        break;
+
       // Silently ignore echoed user events and telemetry spans
       case "user.message":
       case "user.tool_confirmation":
       case "user.custom_tool_result":
+      case "agent.mcp_tool_result":
+      case "agent.tool_result":
       case "span.model_request_start":
       case "span.model_request_end":
         break;
