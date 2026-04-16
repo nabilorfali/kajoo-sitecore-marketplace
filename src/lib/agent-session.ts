@@ -50,9 +50,14 @@ export async function sendMessage(
  *   { type: "done"                   }
  *   { type: "error",    text: string }
  */
+export async function openStream(client: Anthropic, sessionId: string) {
+  return client.beta.sessions.events.stream(sessionId);
+}
+
 export async function* streamSession(
   client: Anthropic,
   sessionId: string,
+  preOpenedStream?: AsyncIterable<BetaManagedAgentsStreamSessionEvents>,
 ): AsyncGenerator<
   | { type: "text"; text: string }
   | { type: "activity"; text: string }
@@ -60,7 +65,7 @@ export async function* streamSession(
   | { type: "done" }
   | { type: "error"; text: string }
 > {
-  const stream = await client.beta.sessions.events.stream(sessionId);
+  const stream = preOpenedStream ?? await client.beta.sessions.events.stream(sessionId);
 
   for await (const event of stream as AsyncIterable<BetaManagedAgentsStreamSessionEvents>) {
     switch (event.type) {
